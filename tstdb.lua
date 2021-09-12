@@ -14,15 +14,15 @@ ffi.cdef[[
 local function TSTDB(filename)
 
 	local self = {}
-	
+
 	-- private variables
-	
+
 	local file, err, byte, key_count
 	local node_count, size_of_node, wildcard_byte
 	local buffer_pool, node_capacity, nodes, separator_byte
 
 	-- private methods
-	
+
 	local function get_line_no(file, pos)
 		file:seek("set", 0)
 		local line_no = 1
@@ -37,11 +37,15 @@ local function TSTDB(filename)
 
 
 	local function get_segment(buffer, buf_len, callback, segment)
+		if not segment then
+			callback(ffi.string(buffer, buf_len))
+			return
+		end
 		local count, start = 0, 0
 		for i = 0, buf_len - 1 do
 			if buffer[i] == separator_byte then
-				if count == segment then 
-					callback(ffi.string(buffer + start, i - start)) 
+				if count == segment then
+					callback(ffi.string(buffer + start, i - start))
 					return
 				end
 				count = count + 1
@@ -52,26 +56,26 @@ local function TSTDB(filename)
 			callback(ffi.string(buffer + start, buf_len - start))
 		end
 	end
-	
-	
+
+
 	local function fetch_buffer()
 		local buffer = buffer_pool[#buffer_pool]
-		if not buffer then 
-			return ffi.new("uint8_t[?]", TST_MAX_KEY_LEN) 
+		if not buffer then
+			return ffi.new("uint8_t[?]", TST_MAX_KEY_LEN)
 		end
 		buffer_pool[#buffer_pool] = nil
 		return buffer
 	end
-	
-	
+
+
 	local function release_buffer(buffer)
 		buffer_pool[#buffer_pool + 1] = buffer
 	end
-	
-		
+
+
 	local function load_db(filename, tst)
 		local file, err = io.open(filename, "r+")
-		if not file then 
+		if not file then
 			-- file doesn't exist: create a new one
 			file, err = io.open(filename, "w+")
 			if not file then
@@ -79,10 +83,10 @@ local function TSTDB(filename)
 			end
 			-- write header
 			file:write(TST_FILE_HEADER, "\n")
-			file:flush()	
-		else 
+			file:flush()
+		else
 			-- file exist: check header
-			if file:read() ~= TST_FILE_HEADER then 	 
+			if file:read() ~= TST_FILE_HEADER then
 				file:close()
 				return nil, "file '" .. filename .. "' is not a database file: header expected"
 			end
@@ -104,7 +108,7 @@ local function TSTDB(filename)
 				key_len, tab = file:read("*n", 1)
 			end
 			local cur_pos, end_pos = file:seek(), file:seek("end")
-			if key_len or cur_pos ~= end_pos then 
+			if key_len or cur_pos ~= end_pos then
 				-- file is corrupt
 				if cur_pos == end_pos and end_pos - pos < TST_MAX_KEY_LEN then
 					-- only the last entry is damaged: clear and rewind to the last correct position
@@ -118,15 +122,15 @@ local function TSTDB(filename)
 					file:close()
 					local msg = "database file '" .. filename .. "' is corrupt at line " .. line_no
 					if key then
-						if byte(key, #key) == 10 then 
-							key = string.sub(key, 1, #key - 1) 
-						end 
+						if byte(key, #key) == 10 then
+							key = string.sub(key, 1, #key - 1)
+						end
 						msg = msg .. " near '" .. string.sub(key, 1, 40) .. "'"
 					end
 					if key_len and tab ~= "\t" then
 						msg = msg .. ": horizontal tab after key length expected"
 					end
-					return nil, msg 	 				
+					return nil, msg
 				end
 			elseif pos == end_pos then
 				file:write("\n")
@@ -134,8 +138,8 @@ local function TSTDB(filename)
 		end
 		return file
 	end
-	
-	
+
+
 	local function init()
 		byte = string.byte
 		wildcard_byte = byte(TST_WILDCARD)
@@ -151,62 +155,69 @@ local function TSTDB(filename)
 		end
 		return self
 	end
-	
-	
+
+
 	local function grow()
 		node_capacity = node_capacity * TST_GROW_FACTOR
 		local tmp = ffi.new("TSTNode[?]", node_capacity)
 		ffi.copy(tmp, nodes, node_count	* size_of_node)
-		nodes = tmp	
+		nodes = tmp
 	end
-	
-	
+
+
 	local function traverse_desc(node, buffer, buf_index, callback)
 		if node == nodes[0] then return end
 		traverse_desc(nodes[node.high], buffer, buf_index, callback)
 		buffer[buf_index] = node.splitchar
 		traverse_desc(nodes[node.equal], buffer, buf_index + 1, callback)
-		if node.flag == 1 then 
-			callback(ffi.string(buffer, buf_index + 1)) 
+		if node.flag == 1 then
+			callback(ffi.string(buffer, buf_index + 1))
 		end
 		traverse_desc(nodes[node.low], buffer, buf_index, callback)
 	end
 
 
-	local function traverse_wc(node, key, key_index, buffer, buf_index, callback, segment)
-		if node == nodes[0] then return end
+	local function traverse_wc(node, key, key_index, buffer, buf_index, callback, segment, match_null)
+		if node == nodes[0] or key_index > #key then return end
 		local key_char = byte(key, key_index)
 		local diff = key_char - node.splitchar
 		local wildcard = key_char == wildcard_byte
-		
-		if diff < 0 or wildcard then
-			traverse_wc(nodes[node.low], key, key_index, buffer, buf_index, callback, segment)
+
+		if wildcard and match_null and not match_null[key_index] then
+			traverse_wc(node, key, key_index + 1, buffer, buf_index, callback, segment, match_null)
+			match_null[key_index] = true
 		end
-		if diff == 0 or wildcard then	
-			buffer[buf_index] = node.splitchar		
+
+		if diff < 0 or wildcard then
+			traverse_wc(nodes[node.low], key, key_index, buffer, buf_index, callback, segment, match_null)
+		end
+
+		if diff == 0 or wildcard then
+			buffer[buf_index] = node.splitchar
 			if key_index < #key then
-				traverse_wc(nodes[node.equal], key, key_index + 1, buffer, buf_index + 1, callback, segment)
-			elseif node.flag == 1 then
-				if segment then
+				traverse_wc(nodes[node.equal], key, key_index + 1, buffer, buf_index + 1, callback, segment, match_null)
+				if match_null and key_index == #key - 1
+					and byte(key, #key) == wildcard_byte and node.flag == 1 then
 					get_segment(buffer, buf_index + 1, callback, segment)
-				else	
-					callback(ffi.string(buffer, buf_index + 1))
 				end
+			elseif node.flag == 1 then
+				get_segment(buffer, buf_index + 1, callback, segment)
 			end
 			if wildcard then
-				traverse_wc(nodes[node.equal], key, key_index, buffer, buf_index + 1, callback, segment)
+				traverse_wc(nodes[node.equal], key, key_index, buffer, buf_index + 1, callback, segment, match_null)
 			end
 		end
+
 		if diff > 0 or wildcard then
-			traverse_wc(nodes[node.high], key, key_index, buffer, buf_index, callback, segment)
-		end		
-	end		
-					
+			traverse_wc(nodes[node.high], key, key_index, buffer, buf_index, callback, segment, match_null)
+		end
+	end
+
 	-- public methods
 
 	function self.get(key)
 		local key_index, key_len, key_char = 1, #key, byte(key, 1)
-		local node, root_node = nodes[1], nodes[0]			
+		local node, root_node = nodes[1], nodes[0]
 		if not key_char then return false end
 
 		repeat
@@ -224,16 +235,16 @@ local function TSTDB(filename)
 				key_char = byte(key, key_index)
 			end
 		until node == root_node
-		
+
 		return false
 	end
 
 
 	function self.put(key, clear)
 		local key_index, key_len, key_char = 1, #key, byte(key, 1)
-		local node, root_node, prev_node, diff = nodes[1], nodes[0]		
+		local node, root_node, prev_node, diff = nodes[1], nodes[0]
 		if not key_char or key_len > TST_MAX_KEY_LEN then return false end
-		
+
 		repeat
 			prev_node = node
 			diff = key_char - node.splitchar
@@ -243,42 +254,42 @@ local function TSTDB(filename)
 				node = nodes[node.low]
 			elseif key_index == key_len then
 				if clear then
-					if node.flag == 1 then 
+					if node.flag == 1 then
 						node.flag = 0
-						key_count = key_count - 1 
+						key_count = key_count - 1
 						if file then
-							file:write(-#key, "\t", key, "\n")	
-							file:flush()	
+							file:write(-#key, "\t", key, "\n")
+							file:flush()
 						end
-						return true						
+						return true
 					end
-				elseif node.flag == 0 then 
+				elseif node.flag == 0 then
 					node.flag = 1
-					key_count = key_count + 1 
+					key_count = key_count + 1
 					if file then
-						file:write(#key, "\t", key, "\n")	
-						file:flush()	
+						file:write(#key, "\t", key, "\n")
+						file:flush()
 					end
-					return true					
+					return true
 				end
-				return false		
+				return false
 			else
 				node = nodes[node.equal]
 				key_index = key_index + 1
 				key_char = byte(key, key_index)
 			end
 		until node == root_node
-		
+
 		if clear then return false end
-		
+
 		if diff > 0 then
 			prev_node.high = node_count
 		elseif diff < 0 then
 			prev_node.low = node_count
-		else 
+		else
 			prev_node.equal = node_count
 		end
-		
+
 		repeat
 			if node_count == node_capacity then grow() end
 			node = nodes[node_count]
@@ -290,45 +301,45 @@ local function TSTDB(filename)
 			node.equal = node_count
 			key_index = key_index + 1
 		until key_index > key_len
-		
+
 		node.flag = 1
 		node.equal = 0
 		key_count = key_count + 1
 		if file then
-			file:write(#key, "\t", key, "\n")	
-			file:flush()	
+			file:write(#key, "\t", key, "\n")
+			file:flush()
 		end
 		return true
 	end
-	
-	
+
+
 	function self.remove(key)
 		return self.put(key, true)
 	end
-	
-	
-	function self.search(key, callback, segment)
+
+
+	function self.search(key, callback, segment, match_null)
 		if #key > 0 then
 			local buffer = fetch_buffer()
-			traverse_wc(nodes[1], key, 1, buffer, 0, callback, segment)
+			traverse_wc(nodes[1], key, 1, buffer, 0, callback, segment, match_null and {})
 			release_buffer(buffer)
 		end
 	end
 
 
-	function self.keys(callback, desc)	
+	function self.keys(callback, desc)
 		if desc then
 			local buffer = fetch_buffer()
-			traverse_desc(nodes[1], buffer, 0, callback)	
+			traverse_desc(nodes[1], buffer, 0, callback)
 			release_buffer(buffer)
 		else
 			self.search(TST_WILDCARD, callback)
-		end	
+		end
 	end
-	
-	
+
+
 	function self.clear()
-		ffi.fill(nodes, size_of_node * 2) 
+		ffi.fill(nodes, size_of_node * 2)
 		node_count = 1
 		key_count = 0
 		if file then
@@ -336,22 +347,22 @@ local function TSTDB(filename)
 			assert(os.remove(filename))
 			file = assert(load_db(filename, self))
 		end
-	end	
-	
-	
+	end
+
+
 	function self.key_count()
 		return key_count
-	end	
+	end
 
 
 	function self.node_count()
 		return node_count - 1
-	end	
+	end
 
 
 	function self.node_capacity()
 		return node_capacity
-	end	
+	end
 
 
 	function self.optimize()
@@ -371,7 +382,7 @@ local function TSTDB(filename)
 			file:close()
 			file = nil
 			assert(os.rename(filename, filename .. ".tmp"))
-			self.clear()			
+			self.clear()
 			file = assert(load_db(filename, self))
 		else
 			self.clear()
@@ -389,11 +400,11 @@ local function TSTDB(filename)
 		local write, char = io.write, string.char
 		local count, splitchar = 0
 		write("node\tchar\tlow\tequal\thigh\tflag\n")
-		
+
 		for i = 1, node_count - 1 do
 			local node = nodes[i]
 			splitchar = node.splitchar
-			if splitchar > 31 and splitchar < 127 then 
+			if splitchar > 31 and splitchar < 127 then
 				splitchar = "'" .. char(splitchar) .. "'"
 			end
 			write(i, "\t", splitchar, "\t", node.low, "\t", node.equal, "\t", node.high, "\t", node.flag, "\n")
@@ -402,11 +413,11 @@ local function TSTDB(filename)
 				write("more? ")
 				local b = byte(io.read(), 1)
 				if b and b ~= 121 then break end
-				count = 0 
+				count = 0
 			end
-		end	
+		end
 	end
-	
+
 
 	function self.state()
 		if node_count == 1 then return 1 end
@@ -414,39 +425,39 @@ local function TSTDB(filename)
 		local high, high_offset = 0, 0
 		for i = 1, node_count - 1 do
 			local node = nodes[i]
-			if node.low ~= 0 then 
-				low = low + 1 
+			if node.low ~= 0 then
+				low = low + 1
 				low_offset = low_offset + node.low
 			end
 			if node.high ~= 0 then
-				high = high + 1 
+				high = high + 1
 				high_offset = high_offset + node.high
-			end			
+			end
 		end
 		local balance = 1 - (math.abs(low - high) / (low + high))
 		local balance_offset = 1 - (math.abs(low_offset - high_offset) / (low_offset + high_offset))
 		return (balance + balance_offset) / 2
 	end
-	
-	
+
+
 	function self.separator(new_separator)
-		if new_separator then 
+		if new_separator then
 			separator_byte = byte(new_separator)
 		end
 		return string.char(separator_byte)
 	end
-		
+
 
 	function self.close()
-		if file then 
+		if file then
 			file:close()
 			file = nil
 		end
 	end
-	
-	
+
+
 	return init()
-	
+
 end
 
 return TSTDB
